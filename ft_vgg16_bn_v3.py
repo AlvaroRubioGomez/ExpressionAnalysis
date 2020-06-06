@@ -13,8 +13,14 @@ from torch.utils.tensorboard import SummaryWriter
 def get_data(batch_size, img_root):
 
     #Define transformation that you wish to apply on image
-    data_transforms = transforms.Compose([transforms.ToTensor(),
-                                        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    data_transforms = transforms.Compose([
+                                        #transforms.Resize((224,224)),
+                                        transforms.ColorJitter(brightness=0.5),
+                                        transforms.RandomRotation(degrees=15),
+                                        transforms.RandomHorizontalFlip(p=0.5),
+                                        transforms.ToTensor()
+                                        #,transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                                        ])
     #Load the datasets with ImageFolder
     image_datasets = datasets.ImageFolder(root=img_root , transform=data_transforms)
 
@@ -38,11 +44,18 @@ def get_data(batch_size, img_root):
 def load_model(num_classes):
 
     #Load the vgg16 pretrained
-    model = models.vgg16_bn(pretrained=True) 
+    #vgg_16_bn
+    #model = models.vgg16_bn(pretrained=True) 
+    #resnet16
+    model = models.resnet18(pretrained=True)   
 
     #Output layer
-    num_ftrs = model.classifier[6].in_features     
-    model.classifier[6] = nn.Linear(num_ftrs, num_classes) # modified output
+    #vgg_16_bn
+    #num_ftrs = model.classifier[6].in_features        
+    #model.classifier[6] = nn.Linear(num_ftrs, num_classes) # modified output
+    #resnet16
+    num_ftrs = model.fc.in_features        
+    model.fc = nn.Linear(num_ftrs, num_classes) # modified output
 
     return model
 
@@ -93,16 +106,18 @@ def test(model, test_loader, cost_function, device, show=False):
             n_samples+= images.shape[0]
             cumulative_loss += loss.item() # Note: the .item() is needed to extract scalars from tensors
             _, predicted = outputs.max(1)
-            cumulative_accuracy += predicted.eq(labels).sum().item()
+            cumulative_accuracy += predicted.eq(labels).sum().item()  
+            #print(batch_id)
 
-    test_loss = cumulative_loss/n_samples
-    test_acc = cumulative_accuracy/n_samples*100
+            #test
+            del images, labels, outputs, loss
+          
 
     if(show):
-        print(f'test_loss:{test_loss}')
-        print(f'test_accuracy:{test_acc}')
+        print(f'test_loss:{cumulative_loss/n_samples}')
+        print(f'test_accuracy:{cumulative_accuracy/n_samples*100}')
 
-    return test_loss, test_acc
+    return cumulative_loss/n_samples, cumulative_accuracy/n_samples*100
 
 
 #Train of a single batch
@@ -133,14 +148,11 @@ def batch_train(model, images, labels, optimizer, cost_function, device):   #Tra
     n_samples += labels.size(0)   
     n_correct += (predicted == labels).sum().item()        
 
-    train_loss = cumulative_loss/n_samples
-    train_acc = n_correct/n_samples*100
-
-    return train_loss, train_acc
+    return cumulative_loss/n_samples, n_correct/n_samples*100
 
 
 
-def get_grid_images(data_loader, writer, tittle):
+def get_grid_images(data_loader, writer, tittle, show=False):
     #Tensorboard grid images
     img_batch_obj = iter(data_loader)
     example_data, example_targets = next(img_batch_obj)
@@ -148,11 +160,16 @@ def get_grid_images(data_loader, writer, tittle):
     writer.add_image('test loader batch', img_grid)
     writer.close()
 
+    if(show):
+        print("Image shape:", example_data.size())
 
 
-def main(batch_size = 64, 
+
+def main(batch_size = 128, 
         learning_rate = 0.00001, 
-        num_epochs = 10,
+        step_size = 10,
+        gamma = 0.1,
+        num_epochs = 25,
         num_classes = 7,
         img_root = None):
     
@@ -168,8 +185,9 @@ def main(batch_size = 64,
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     #Tensorboard configuration
-    writer_train = SummaryWriter("runs/train")
-    writer_test = SummaryWriter("runs/test")
+    comment = f'LR:{learning_rate},BS:{batch_size}, SS:{step_size}, G:{gamma}, No normalization, Resnet18, dataaugx3'
+    writer_train = SummaryWriter('runs/train/' + comment)
+    writer_test = SummaryWriter('runs/test/' + comment)
 
     #Load model
     model = load_model(num_classes)
@@ -182,17 +200,23 @@ def main(batch_size = 64,
                                 optimizer_type='Adam', show=True)
     cost_function = get_cost_function()
 
+    #scheduler
+    step_lr_scheduler = lr_scheduler.StepLR(optimizer=optimizer, step_size=step_size, gamma=gamma) #Every 'step_size' epochs, learning rate is multiply by gamma.
+
     #Grid images to tensorboard
-    get_grid_images(data_loader=test_loader, writer=writer_test, tittle='test loader batch')      
-    
+    get_grid_images(data_loader=test_loader, writer=writer_test, tittle='test loader batch', show=True)      
+        
     #Before training
     print('Before training:')
     train_loss, train_accuracy = test(model, train_loader, cost_function, device)
-    test_loss, test_accuracy = test(model, test_loader, cost_function, device)
+    test_loss, test_accuracy = test(model, test_loader, cost_function, device)    
 
     print('\t Training loss {:.5f}, Training accuracy {:.2f}'.format(train_loss, train_accuracy))
     print('\t Test loss {:.5f}, Test accuracy {:.2f}'.format(test_loss, test_accuracy))
     print('-----------------------------------------------------')
+
+    #delete
+    del train_loss, train_accuracy, test_loss, test_accuracy
 
     #Training
     n_total_steps = len(train_loader)
@@ -219,9 +243,19 @@ def main(batch_size = 64,
                 writer_train.add_scalar('Accuracy', train_acc, global_step=step)
                 writer_test.add_scalar('Loss', test_loss, global_step=step)
                 writer_test.add_scalar('Accuracy', test_acc, global_step=step)
+
+                #delete
+                del test_loss, test_acc
             
             #Increase step
             step += 1
+
+            #delete
+            del train_loss, train_acc
+        
+        #Apply scheduler
+        step_lr_scheduler.step()
+        print("LR:", step_lr_scheduler.get_last_lr())
 
     #Close writer
     writer_test.close()
