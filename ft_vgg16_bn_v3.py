@@ -7,9 +7,11 @@ import torchvision
 from torchvision import datasets, models, transforms
 
 import sys
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter #tensorboard
 
 import argparse
+
+import wandb #weight&bias
 
 #Arguments
 def parse_args():
@@ -71,6 +73,16 @@ def get_data(batch_size, img_root, verbose):
     test_loader = torch.utils.data.DataLoader(test_data, batch_size, shuffle=False)
 
     return train_loader, test_loader
+
+#check data
+def check_data(data, num_classes):    
+    label_list = np.zeros([1,num_classes])   
+    for _, labels in data:
+        #print(labels)
+        for num in labels:
+            label_list[0][num.item()] += 1                
+    
+    return label_list
 
 
 #Load model
@@ -208,6 +220,29 @@ def get_grid_images(data_loader, writer, tittle, verbose):
     if(verbose):
         print("Image shape:", example_data.size())
 
+def get_confusion_matrix(nb_classes, data_loader, model, device, verbose):
+
+    confusion_matrix = torch.zeros(nb_classes, nb_classes)
+
+    #Test
+    if(verbose):
+        print("check", check_data(data_loader, nb_classes))
+
+    with torch.no_grad():
+        for i, (inputs, classes) in enumerate(data_loader):
+            inputs = inputs.to(device)
+            classes = classes.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            for t, p in zip(classes.view(-1), preds.view(-1)):
+                    confusion_matrix[t.long(), p.long()] += 1
+
+    if(verbose):
+        print(confusion_matrix)
+        print(confusion_matrix.diag()/confusion_matrix.sum(1))
+
+        print("check", confusion_matrix.sum(1))
+
 
 
 def main(args):  
@@ -217,10 +252,18 @@ def main(args):
     learning_rate = args.lr
     lr_scheduler_flag, step_size, gamma = args.lr_scheduler   
     num_classes = 7
-    img_root = args.img_root      
-        
+    img_root = args.img_root    
+
+    #weight&bias
+    wandb.init(project="facial-expressions-project") 
+    wandb.config.batch_size = batch_size 
+    wandb.config.num_epochs = num_epochs
+    wandb.config.learning_rate = learning_rate
+    wandb.config.step_size = step_size
+    wandb.config.gamma = gamma
+            
     #Data loader
-    train_loader, test_loader = get_data(batch_size=batch_size, img_root=img_root, verbose=args.verbose)
+    train_loader, test_loader = get_data(batch_size=batch_size, img_root=img_root, verbose=args.verbose) 
     
     #classes
     classes = ('Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral')
@@ -229,9 +272,9 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     #Tensorboard configuration
-    comment = f'm:{args.model}, LR:{learning_rate},BS:{batch_size}, e:{num_epochs}, SS:{step_size}, G:{gamma}'
-    writer_train = SummaryWriter('runs/train/' + comment)
-    writer_test = SummaryWriter('runs/test/' + comment)
+    #comment = f'm:{args.model}, LR:{learning_rate},BS:{batch_size}, e:{num_epochs}, SS:{step_size}, G:{gamma}'
+    #writer_train = SummaryWriter('runs/train/' + comment)
+    #writer_test = SummaryWriter('runs/test/' + comment)
 
     #Load model
     model = load_model(num_classes, args.model, args.verbose)
@@ -249,7 +292,7 @@ def main(args):
         step_lr_scheduler = lr_scheduler.StepLR(optimizer=optimizer, step_size=step_size, gamma=gamma) #Every 'step_size' epochs, learning rate is multiply by gamma.
 
     #Grid images to tensorboard
-    get_grid_images(data_loader=test_loader, writer=writer_test, tittle='test loader batch', verbose = args.verbose)      
+    #get_grid_images(data_loader=test_loader, writer=writer_test, tittle='test loader batch', verbose = args.verbose)      
         
     #Before training
     print('Before training:')
@@ -283,10 +326,18 @@ def main(args):
                 print (f'Epoch [{epoch+1}/{num_epochs}], Step [{batch_id+1}/{n_total_steps}], Train Loss: {train_loss:.4f}, Train Acc: {train_acc}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc}')
 
                 #Write tensorboard logs               
-                writer_train.add_scalar('Loss', train_loss, global_step=step)
-                writer_train.add_scalar('Accuracy', train_acc, global_step=step)
-                writer_test.add_scalar('Loss', test_loss, global_step=step)
-                writer_test.add_scalar('Accuracy', test_acc, global_step=step)
+                #writer_train.add_scalar('Loss', train_loss, global_step=step)
+                #writer_train.add_scalar('Accuracy', train_acc, global_step=step)
+                #writer_test.add_scalar('Loss', test_loss, global_step=step)
+                #writer_test.add_scalar('Accuracy', test_acc, global_step=step)
+
+                #weight&bias
+                wandb.log({
+                    "Train loss": train_loss,
+                    "Train accuracy": train_acc})
+                wandb.log({
+                    "Test loss": test_loss,
+                    "Test accuracy": test_acc})
 
                 #delete
                 del test_loss, test_acc
@@ -304,8 +355,8 @@ def main(args):
                 print("LR:", step_lr_scheduler.get_last_lr())
 
     #Close writer
-    writer_test.close()
-    writer_train.close()
+    #writer_test.close()
+    #writer_train.close()
 
 
     print('After training:')
@@ -315,6 +366,9 @@ def main(args):
     print('\t Training loss {:.5f}, Training accuracy {:.2f}'.format(train_loss, train_accuracy))
     print('\t Test loss {:.5f}, Test accuracy {:.2f}'.format(test_loss, test_accuracy))
     print('-----------------------------------------------------')
+
+    #Confusion matrix
+    get_confusion_matrix(num_classes, test_loader, model, device, args.verbose)
 
 
 
